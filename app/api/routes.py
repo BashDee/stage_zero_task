@@ -1,3 +1,5 @@
+from typing import Any
+
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
@@ -6,6 +8,7 @@ from app.services.classify import ClassifyService
 from app.services.profiles import ProfileNotFoundError, ProfilesService
 
 router = APIRouter(prefix="/api", tags=["classification"])
+INVALID_QUERY_PARAMS_MESSAGE = "Invalid query parameters"
 
 
 def _build_error_response(status_code: int, message: str) -> JSONResponse:
@@ -13,6 +16,120 @@ def _build_error_response(status_code: int, message: str) -> JSONResponse:
         status_code=status_code,
         content=ErrorResponse(message=message).model_dump(),
     )
+
+
+def _single_query_param(request: Request, key: str) -> str | None:
+    values = request.query_params.getlist(key)
+    if len(values) == 0:
+        return None
+    if len(values) > 1:
+        raise ValueError("duplicate")
+    return values[0]
+
+
+def _parse_positive_int(value: str, *, max_value: int | None = None) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError("range")
+    if max_value is not None and parsed > max_value:
+        raise ValueError("range")
+    return parsed
+
+
+def _parse_non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise ValueError("range")
+    return parsed
+
+
+def _parse_probability(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0.0 or parsed > 1.0:
+        raise ValueError("range")
+    return parsed
+
+
+def _parse_profiles_list_query(request: Request) -> dict[str, Any]:
+    allowed = {
+        "gender",
+        "age_group",
+        "country_id",
+        "min_age",
+        "max_age",
+        "min_gender_probability",
+        "min_country_probability",
+        "sort_by",
+        "order",
+        "page",
+        "limit",
+    }
+
+    for key in request.query_params.keys():
+        if key not in allowed:
+            raise ValueError("invalid")
+
+    gender = _single_query_param(request, "gender")
+    age_group = _single_query_param(request, "age_group")
+    country_id = _single_query_param(request, "country_id")
+    min_age = _single_query_param(request, "min_age")
+    max_age = _single_query_param(request, "max_age")
+    min_gender_probability = _single_query_param(request, "min_gender_probability")
+    min_country_probability = _single_query_param(request, "min_country_probability")
+    sort_by = (_single_query_param(request, "sort_by") or "created_at").strip().lower()
+    order = (_single_query_param(request, "order") or "asc").strip().lower()
+    page = _single_query_param(request, "page") or "1"
+    limit = _single_query_param(request, "limit") or "10"
+
+    if gender is not None and gender.strip().lower() not in {"male", "female"}:
+        raise ValueError("invalid")
+
+    if age_group is not None and age_group.strip().lower() not in {
+        "child",
+        "teenager",
+        "adult",
+        "senior",
+    }:
+        raise ValueError("invalid")
+
+    if country_id is not None:
+        cleaned_country_id = country_id.strip().upper()
+        if len(cleaned_country_id) != 2 or not cleaned_country_id.isalpha():
+            raise ValueError("invalid")
+
+    if sort_by not in {"age", "created_at", "gender_probability"}:
+        raise ValueError("invalid")
+
+    if order not in {"asc", "desc"}:
+        raise ValueError("invalid")
+
+    parsed_min_age = _parse_non_negative_int(min_age) if min_age is not None else None
+    parsed_max_age = _parse_non_negative_int(max_age) if max_age is not None else None
+
+    if (
+        parsed_min_age is not None
+        and parsed_max_age is not None
+        and parsed_min_age > parsed_max_age
+    ):
+        raise ValueError("invalid")
+
+    return {
+        "gender": gender,
+        "age_group": age_group,
+        "country_id": country_id,
+        "min_age": parsed_min_age,
+        "max_age": parsed_max_age,
+        "min_gender_probability": _parse_probability(min_gender_probability)
+        if min_gender_probability is not None
+        else None,
+        "min_country_probability": _parse_probability(min_country_probability)
+        if min_country_probability is not None
+        else None,
+        "sort_by": sort_by,
+        "order": order,
+        "page": _parse_positive_int(page),
+        "limit": _parse_positive_int(limit, max_value=50),
+    }
 
 
 @router.get(
@@ -68,6 +185,45 @@ async def create_profile(request: Request):
 
 
 @router.get(
+    "/profiles/search",
+    summary="Search profiles with natural language",
+    responses={
+        200: {"description": "Profiles fetched"},
+        400: {"model": ErrorResponse, "description": "Missing or invalid query"},
+        422: {"model": ErrorResponse, "description": "Invalid query parameters"},
+        500: {"model": ErrorResponse, "description": "Unexpected server error"},
+    },
+)
+async def search_profiles(request: Request):
+    for key in request.query_params.keys():
+        if key not in {"q", "page", "limit"}:
+            return _build_error_response(422, INVALID_QUERY_PARAMS_MESSAGE)
+
+    try:
+        page = _single_query_param(request, "page") or "1"
+        limit = _single_query_param(request, "limit") or "10"
+        q = _single_query_param(request, "q")
+    except ValueError:
+        return _build_error_response(422, INVALID_QUERY_PARAMS_MESSAGE)
+
+    if q is None or q.strip() == "":
+        return _build_error_response(400, "Missing or empty required parameter")
+
+    # Reuse numeric validation for pagination.
+    try:
+        page_value = _parse_positive_int(page)
+        limit_value = _parse_positive_int(limit, max_value=50)
+    except (ValueError, TypeError):
+        return _build_error_response(422, INVALID_QUERY_PARAMS_MESSAGE)
+
+    service = ProfilesService(request.app.state.http_client)
+    payload = service.search_profiles(query=q, page=page_value, limit=limit_value)
+    if payload is None:
+        return _build_error_response(400, "Unable to interpret query")
+    return payload
+
+
+@router.get(
     "/profiles/{profile_id}",
     summary="Get profile by ID",
     responses={
@@ -96,16 +252,14 @@ async def get_profile(profile_id: str, request: Request):
 )
 async def get_profiles(
     request: Request,
-    gender: str | None = None,
-    country_id: str | None = None,
-    age_group: str | None = None,
 ):
+    try:
+        query = _parse_profiles_list_query(request)
+    except (ValueError, TypeError):
+        return _build_error_response(422, INVALID_QUERY_PARAMS_MESSAGE)
+
     service = ProfilesService(request.app.state.http_client)
-    return service.list_profiles(
-        gender=gender,
-        country_id=country_id,
-        age_group=age_group,
-    )
+    return service.list_profiles(**query)
 
 
 @router.delete(

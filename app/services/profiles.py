@@ -14,17 +14,23 @@ from app.models.profile import (
     ProfileAlreadyExistsResponse,
     ProfileData,
     ProfileSuccessResponse,
-    ProfileSummary,
     ProfilesListResponse,
 )
-from app.repositories.profiles import NewProfileRecord, ProfileRecord, ProfileRepository
+from app.repositories.profiles import (
+    NewProfileRecord,
+    ProfileQuery,
+    ProfileRecord,
+    ProfileRepository,
+)
 from app.services.agify import AgifyService
+from app.services.countries import country_name_from_code
 from app.services.genderize import (
     GenderizeService,
     NoPredictionAvailableError,
     UpstreamServiceError,
 )
 from app.services.nationalize import NationalizeService
+from app.services.profile_search_parser import ProfileSearchParser
 
 
 class ProfileNotFoundError(Exception):
@@ -37,6 +43,7 @@ class ProfilesService:
         self._agify_service = AgifyService(client)
         self._nationalize_service = NationalizeService(client)
         self._repository = ProfileRepository(get_supabase_client())
+        self._search_parser = ProfileSearchParser()
 
     @staticmethod
     def _utc_now_iso() -> str:
@@ -94,23 +101,12 @@ class ProfilesService:
             name=record.name,
             gender=record.gender,
             gender_probability=record.gender_probability,
-            sample_size=record.sample_size,
             age=record.age,
             age_group=record.age_group,
             country_id=record.country_id,
+            country_name=record.country_name,
             country_probability=record.country_probability,
             created_at=record.created_at,
-        )
-
-    @staticmethod
-    def _to_profile_summary(record: ProfileRecord) -> ProfileSummary:
-        return ProfileSummary(
-            id=record.id,
-            name=record.name,
-            gender=record.gender,
-            age=record.age,
-            age_group=record.age_group,
-            country_id=record.country_id,
         )
 
     async def create_profile(
@@ -121,7 +117,7 @@ class ProfilesService:
             return validation_status, validated_name
 
         normalized_name = self._normalize_name(validated_name)
-        existing = self._repository.get_by_normalized_name(normalized_name)
+        existing = self._repository.get_by_name(normalized_name)
         if existing is not None:
             return 200, ProfileAlreadyExistsResponse(data=self._to_profile_data(existing))
 
@@ -135,22 +131,20 @@ class ProfilesService:
             return 502, ErrorResponse(message=str(exc))
 
         age_group = self._age_group(agify_result.age)
+        country_id = nationalize_result.country_id.upper()
         created_record = self._repository.create(
             NewProfileRecord(
                 id=self._uuid_v7(),
-                name=validated_name,
-                normalized_name=normalized_name,
-                gender=gender_result.data.gender,
+                name=normalized_name,
+                gender=gender_result.data.gender.lower(),
                 gender_probability=gender_result.data.probability,
                 sample_size=gender_result.data.sample_size,
                 age=agify_result.age,
                 age_group=age_group,
-                country_id=nationalize_result.country_id,
+                country_id=country_id,
+                country_name=country_name_from_code(country_id),
                 country_probability=nationalize_result.country_probability,
                 created_at=self._utc_now_iso(),
-                normalized_gender=gender_result.data.gender.lower(),
-                normalized_age_group=age_group.lower(),
-                normalized_country_id=nationalize_result.country_id.lower(),
             )
         )
 
@@ -168,19 +162,55 @@ class ProfilesService:
         gender: str | None,
         country_id: str | None,
         age_group: str | None,
+        min_age: int | None,
+        max_age: int | None,
+        min_gender_probability: float | None,
+        min_country_probability: float | None,
+        sort_by: str,
+        order: str,
+        page: int,
+        limit: int,
     ) -> ProfilesListResponse:
-        records = self._repository.list_profiles(
-            normalized_gender=gender.strip().lower() if isinstance(gender, str) else None,
-            normalized_country_id=country_id.strip().lower()
-            if isinstance(country_id, str)
-            else None,
-            normalized_age_group=age_group.strip().lower()
-            if isinstance(age_group, str)
-            else None,
+        result = self._repository.list_profiles(
+            ProfileQuery(
+                gender=gender.strip().lower() if isinstance(gender, str) else None,
+                country_id=country_id.strip().upper() if isinstance(country_id, str) else None,
+                age_group=age_group.strip().lower() if isinstance(age_group, str) else None,
+                min_age=min_age,
+                max_age=max_age,
+                min_gender_probability=min_gender_probability,
+                min_country_probability=min_country_probability,
+                sort_by=sort_by,  # validated in route layer
+                order=order,  # validated in route layer
+                page=page,
+                limit=limit,
+            )
+        )
+        return ProfilesListResponse(
+            page=page,
+            limit=limit,
+            total=result.total,
+            data=[self._to_profile_data(record) for record in result.rows],
         )
 
-        summaries = [self._to_profile_summary(record) for record in records]
-        return ProfilesListResponse(count=len(summaries), data=summaries)
+    def search_profiles(self, *, query: str, page: int, limit: int) -> ProfilesListResponse | None:
+        parsed = self._search_parser.parse(query)
+        if parsed is None:
+            return None
+
+        return self.list_profiles(
+            gender=parsed.gender,
+            country_id=parsed.country_id,
+            age_group=parsed.age_group,
+            min_age=parsed.min_age,
+            max_age=parsed.max_age,
+            min_gender_probability=None,
+            min_country_probability=None,
+            sort_by="created_at",
+            order="asc",
+            page=page,
+            limit=limit,
+        )
 
     def delete_profile(self, profile_id: str) -> bool:
         return self._repository.delete(profile_id)
