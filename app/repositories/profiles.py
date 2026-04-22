@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
+
 from supabase import Client
 
 
 PROFILE_SELECT_FIELDS = (
-    "id,name,gender,gender_probability,sample_size,age,age_group,country_id,country_probability,created_at"
+    "id,name,gender,gender_probability,age,age_group,country_id,country_name,country_probability,created_at"
+)
+PROFILE_SELECT_FIELDS_FALLBACK = (
+    "id,name,gender,gender_probability,age,age_group,country_id,country_probability,created_at"
 )
 
 
@@ -15,10 +20,10 @@ class ProfileRecord:
     name: str
     gender: str
     gender_probability: float
-    sample_size: int
     age: int
     age_group: str
     country_id: str
+    country_name: str
     country_probability: float
     created_at: str
 
@@ -27,23 +32,62 @@ class ProfileRecord:
 class NewProfileRecord:
     id: str
     name: str
-    normalized_name: str
     gender: str
     gender_probability: float
-    sample_size: int
+    sample_size: int | None
     age: int
     age_group: str
     country_id: str
+    country_name: str
     country_probability: float
     created_at: str
-    normalized_gender: str
-    normalized_age_group: str
-    normalized_country_id: str
+
+
+@dataclass(slots=True)
+class ProfileQuery:
+    gender: str | None = None
+    age_group: str | None = None
+    country_id: str | None = None
+    min_age: int | None = None
+    max_age: int | None = None
+    min_gender_probability: float | None = None
+    min_country_probability: float | None = None
+    sort_by: Literal["age", "created_at", "gender_probability"] = "created_at"
+    order: Literal["asc", "desc"] = "asc"
+    page: int = 1
+    limit: int = 10
+
+
+@dataclass(slots=True)
+class ProfileQueryResult:
+    rows: list[ProfileRecord]
+    total: int
 
 
 class ProfileRepository:
     def __init__(self, client: Client):
         self._client = client
+        self._has_country_name = self._detect_country_name_column()
+        self._has_normalized_name = self._detect_column("normalized_name")
+        self._has_normalized_gender = self._detect_column("normalized_gender")
+        self._has_normalized_age_group = self._detect_column("normalized_age_group")
+        self._has_normalized_country_id = self._detect_column("normalized_country_id")
+        self._has_sample_size = self._detect_column("sample_size")
+
+    def _detect_country_name_column(self) -> bool:
+        return self._detect_column("country_name")
+
+    def _detect_column(self, name: str) -> bool:
+        try:
+            self._client.table("profiles").select(name).limit(1).execute()
+            return True
+        except Exception:
+            return False
+
+    def _select_fields(self) -> str:
+        if self._has_country_name:
+            return PROFILE_SELECT_FIELDS
+        return PROFILE_SELECT_FIELDS_FALLBACK
 
     @staticmethod
     def _map_row(row: dict) -> ProfileRecord:
@@ -52,19 +96,19 @@ class ProfileRepository:
             name=row["name"],
             gender=row["gender"],
             gender_probability=row["gender_probability"],
-            sample_size=row["sample_size"],
             age=row["age"],
             age_group=row["age_group"],
             country_id=row["country_id"],
+            country_name=row.get("country_name") or row["country_id"],
             country_probability=row["country_probability"],
             created_at=row["created_at"],
         )
 
-    def get_by_normalized_name(self, normalized_name: str) -> ProfileRecord | None:
+    def get_by_name(self, normalized_name: str) -> ProfileRecord | None:
         response = (
             self._client.table("profiles")
-            .select(PROFILE_SELECT_FIELDS)
-            .eq("normalized_name", normalized_name)
+            .select(self._select_fields())
+            .eq("name", normalized_name)
             .limit(1)
             .execute()
         )
@@ -78,7 +122,7 @@ class ProfileRepository:
     def get_by_id(self, profile_id: str) -> ProfileRecord | None:
         response = (
             self._client.table("profiles")
-            .select(PROFILE_SELECT_FIELDS)
+            .select(self._select_fields())
             .eq("id", profile_id)
             .limit(1)
             .execute()
@@ -91,62 +135,82 @@ class ProfileRepository:
         return self._map_row(row)
 
     def create(self, record: NewProfileRecord) -> ProfileRecord:
-        self._client.table("profiles").insert(
-            {
-                "id": record.id,
-                "name": record.name,
-                "normalized_name": record.normalized_name,
-                "gender": record.gender,
-                "gender_probability": record.gender_probability,
-                "sample_size": record.sample_size,
-                "age": record.age,
-                "age_group": record.age_group,
-                "country_id": record.country_id,
-                "country_probability": record.country_probability,
-                "created_at": record.created_at,
-                "normalized_gender": record.normalized_gender,
-                "normalized_age_group": record.normalized_age_group,
-                "normalized_country_id": record.normalized_country_id,
-            }
-        ).execute()
+        insert_payload = {
+            "id": record.id,
+            "name": record.name,
+            "gender": record.gender,
+            "gender_probability": record.gender_probability,
+            "age": record.age,
+            "age_group": record.age_group,
+            "country_id": record.country_id,
+            "country_probability": record.country_probability,
+            "created_at": record.created_at,
+        }
+        if self._has_country_name:
+            insert_payload["country_name"] = record.country_name
+        if self._has_sample_size and record.sample_size is not None:
+            insert_payload["sample_size"] = record.sample_size
+        if self._has_normalized_name:
+            insert_payload["normalized_name"] = record.name.strip().lower()
+        if self._has_normalized_gender:
+            insert_payload["normalized_gender"] = record.gender.strip().lower()
+        if self._has_normalized_age_group:
+            insert_payload["normalized_age_group"] = record.age_group.strip().lower()
+        if self._has_normalized_country_id:
+            insert_payload["normalized_country_id"] = record.country_id.strip().lower()
+
+        self._client.table("profiles").insert(insert_payload).execute()
 
         return ProfileRecord(
             id=record.id,
             name=record.name,
             gender=record.gender,
             gender_probability=record.gender_probability,
-            sample_size=record.sample_size,
             age=record.age,
             age_group=record.age_group,
             country_id=record.country_id,
+            country_name=record.country_name,
             country_probability=record.country_probability,
             created_at=record.created_at,
         )
 
-    def list_profiles(
-        self,
-        *,
-        normalized_gender: str | None = None,
-        normalized_country_id: str | None = None,
-        normalized_age_group: str | None = None,
-    ) -> list[ProfileRecord]:
-        query = self._client.table("profiles").select(
-            PROFILE_SELECT_FIELDS
+    def list_profiles(self, query_spec: ProfileQuery) -> ProfileQueryResult:
+        query = self._client.table("profiles").select(self._select_fields(), count="exact")
+
+        if query_spec.gender is not None:
+            query = query.eq("gender", query_spec.gender)
+
+        if query_spec.age_group is not None:
+            query = query.eq("age_group", query_spec.age_group)
+
+        if query_spec.country_id is not None:
+            query = query.eq("country_id", query_spec.country_id)
+
+        if query_spec.min_age is not None:
+            query = query.gte("age", query_spec.min_age)
+
+        if query_spec.max_age is not None:
+            query = query.lte("age", query_spec.max_age)
+
+        if query_spec.min_gender_probability is not None:
+            query = query.gte("gender_probability", query_spec.min_gender_probability)
+
+        if query_spec.min_country_probability is not None:
+            query = query.gte("country_probability", query_spec.min_country_probability)
+
+        start = (query_spec.page - 1) * query_spec.limit
+        end = start + query_spec.limit - 1
+        response = (
+            query.order(query_spec.sort_by, desc=(query_spec.order == "desc"))
+            .range(start, end)
+            .execute()
         )
-
-        if normalized_gender is not None:
-            query = query.eq("normalized_gender", normalized_gender)
-
-        if normalized_country_id is not None:
-            query = query.eq("normalized_country_id", normalized_country_id)
-
-        if normalized_age_group is not None:
-            query = query.eq("normalized_age_group", normalized_age_group)
-
-        response = query.order("created_at").execute()
         rows = response.data or []
 
-        return [self._map_row(row) for row in rows]
+        return ProfileQueryResult(
+            rows=[self._map_row(row) for row in rows],
+            total=int(response.count or 0),
+        )
 
     def delete(self, profile_id: str) -> bool:
         # Check if record exists
