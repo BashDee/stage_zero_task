@@ -6,3 +6,4 @@ uvicorn[standard]>=0.30,<1.0
 supabase
 python-dotenv
 pycountry>=24.0.0
+PyJWT>=2.8,<3.0

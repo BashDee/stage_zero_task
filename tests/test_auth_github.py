@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import Mock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 from httpx import Request, Response
 
 import main
+from app.repositories.users import UserRecord
 from app.services.github_oauth import (
     GitHubOAuthService,
     GitHubOAuthConfig,
@@ -31,10 +33,35 @@ class FakeResponse:
 
 @pytest.fixture()
 def auth_client(monkeypatch):
+    from app.services.users import UserService
+    
     monkeypatch.setenv("GITHUB_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+    monkeypatch.setenv("SUPABASE_KEY", "test-key")
+    monkeypatch.setenv("JWT_SECRET_KEY", "test-secret-key")
     monkeypatch.setattr(main, "init_db", lambda: None)
+    
+    # Create mock Supabase client
+    mock_supabase_client = Mock()
+    monkeypatch.setattr("app.db.get_supabase_client", lambda: mock_supabase_client)
 
     with TestClient(main.app) as client:
+        # Create a mock UserService that returns test user
+        mock_user_service = Mock(spec=UserService)
+        test_user = UserRecord(
+            id="550e8400-e29b-41d4-a716-446655440000",
+            github_id=42,
+            username="octocat",
+            email="octo@example.com",
+            avatar_url="https://avatars.example.com/octocat",
+            role="analyst",
+            is_active=True,
+            last_login_at=None,
+            created_at="2026-04-01T00:00:00Z",
+        )
+        mock_user_service.get_or_create.return_value = test_user
+        # Inject the mock UserService after app initialization
+        client.app.state.user_service = mock_user_service
         yield client
 
 
@@ -105,16 +132,11 @@ def test_github_callback_exchanges_code_and_returns_identity(auth_client):
     payload = response.json()
     assert payload["status"] == "success"
     data = payload["data"]
-    assert data["provider"] == "github"
-    assert data["github_id"] == 42
-    assert data["login"] == "octocat"
-    assert data["name"] == "The Octocat"
-    assert data["email"] == "octo@example.com"
-    assert data["avatar_url"] == "https://avatars.example.com/octocat"
-    assert data["html_url"] == "https://github.com/octocat"
+    # Verify token response fields
+    assert "access_token" in data
+    assert "refresh_token" in data
     assert data["token_type"] == "bearer"
-    assert data["scope"] == ["read:user", "user:email"]
-    assert data["processed_at"].endswith("Z")
+    assert data["expires_in"] > 0
 
 
 @pytest.mark.parametrize(

@@ -8,7 +8,12 @@ from fastapi.responses import JSONResponse
 from app.api.auth import router as auth_router
 from app.api.routes import router
 from app.db import init_db
+from app.repositories.tokens import TokenRepository
+from app.repositories.users import UserRepository
 from app.services.github_oauth import InMemoryOAuthStateStore
+from app.services.jwt import JWTService
+from app.services.token_manager import TokenManager
+from app.services.users import UserService
 
 
 @asynccontextmanager
@@ -16,8 +21,25 @@ async def lifespan(app: FastAPI):
     from httpx import AsyncClient, Timeout
 
     init_db()
+    
+    # Initialize HTTP client
     app.state.http_client = AsyncClient(timeout=Timeout(5.0))
+    
+    # Initialize GitHub OAuth state store
     app.state.github_oauth_state_store = InMemoryOAuthStateStore()
+    
+    # Initialize token services
+    from app.db import get_supabase_client
+    
+    supabase = get_supabase_client()
+    app.state.jwt_service = JWTService()
+    app.state.token_repository = TokenRepository(supabase)
+    app.state.token_manager = TokenManager(app.state.jwt_service, app.state.token_repository)
+    
+    # Initialize user services
+    app.state.user_repository = UserRepository(supabase)
+    app.state.user_service = UserService(app.state.user_repository)
+    
     try:
         yield
     finally:
