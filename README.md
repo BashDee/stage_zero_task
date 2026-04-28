@@ -2,6 +2,8 @@
 
 A FastAPI app that supports Stage 0 classification and Stage 2 profile persistence/querying.
 
+It also includes a GitHub OAuth PKCE client module under `/auth/github` and `/auth/github/callback` for stateless identity exchange.
+
 ## What This App Does
 
 - Stage 0:
@@ -14,6 +16,10 @@ A FastAPI app that supports Stage 0 classification and Stage 2 profile persisten
   - Persists normalized profile records in Supabase Postgres
   - Exposes read/list/delete endpoints and natural-language search
   - Supports database-level filtering, sorting, and pagination
+- Auth:
+  - Redirects users to GitHub with PKCE at `GET /auth/github`
+  - Exchanges the callback code at `GET /auth/github/callback`
+  - Returns a normalized GitHub identity payload without issuing local session tokens
 
 ## Tech Stack
 
@@ -33,11 +39,18 @@ A FastAPI app that supports Stage 0 classification and Stage 2 profile persisten
 - `app/repositories/profiles.py` - profile persistence access layer
 - `app/services/classify.py` - Stage 0 validation/orchestration logic
 - `app/services/genderize.py` - Genderize integration
+- `app/services/github_oauth.py` - GitHub OAuth PKCE flow and callback exchange
 - `app/services/agify.py` - Agify integration
 - `app/services/nationalize.py` - Nationalize integration
 - `app/services/profiles.py` - Stage 2 profile orchestration
 - `app/services/profile_search_parser.py` - rule-based natural-language parser
 - `app/services/countries.py` - ISO country code/name resolution
+
+## Environment Variables
+
+- `GITHUB_CLIENT_ID` - required for GitHub OAuth authorization URL generation and token exchange
+- `GITHUB_CLIENT_SECRET` - optional, for compatibility with GitHub OAuth app configurations that still provide a secret
+- `GITHUB_OAUTH_SCOPE` - optional, defaults to `read:user user:email`
 - `app/services/seed_profiles.py` - seed loading + idempotent insert logic
 - `db/schema.sql` - canonical Stage 2 table definition
 - `db/migrations/001_stage2_profiles.sql` - migration notes for Stage 1 to Stage 2

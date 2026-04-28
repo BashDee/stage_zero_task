@@ -5,8 +5,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.auth import router as auth_router
 from app.api.routes import router
 from app.db import init_db
+from app.services.github_oauth import InMemoryOAuthStateStore
 
 
 @asynccontextmanager
@@ -15,6 +17,7 @@ async def lifespan(app: FastAPI):
 
     init_db()
     app.state.http_client = AsyncClient(timeout=Timeout(5.0))
+    app.state.github_oauth_state_store = InMemoryOAuthStateStore()
     try:
         yield
     finally:
@@ -66,3 +69,4 @@ async def unhandled_exception_handler(_: Request, __: Exception):
 
 
 app.include_router(router)
+app.include_router(auth_router)

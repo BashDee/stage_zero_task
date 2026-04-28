@@ -6,6 +6,7 @@ This project is a FastAPI service that provides two API stages:
 
 - Stage 0 classification (`GET /api/classify`) using Genderize.
 - Stage 1 profile persistence (`POST/GET/DELETE /api/profiles`) using Genderize, Agify, Nationalize, and Supabase Postgres.
+- Stage 2 GitHub OAuth PKCE identity exchange (`GET /auth/github`, `GET /auth/github/callback`) without local session issuance.
 
 The service standardizes successful and error responses, performs strict request validation, and persists normalized profile fields for deterministic filtering and idempotent profile creation.
 
@@ -36,8 +37,22 @@ The service standardizes successful and error responses, performs strict request
 ### 3.2 Layered responsibilities
 
 - `app/api/routes.py`: HTTP boundary, request parsing, status-code wiring.
+- `app/api/auth.py`: GitHub OAuth route boundary, redirect handling, callback validation, and identity payload shaping.
 - `app/services/*.py`: business logic, validation, upstream orchestration.
 - `app/repositories/profiles.py`: persistence logic against Supabase `profiles` table.
+
+### 3.3 GitHub OAuth PKCE flow
+
+- `app/services/github_oauth.py` owns the PKCE pair generation, GitHub authorization URL construction, token exchange, and user profile normalization.
+- A short-lived in-memory state store protects the callback verifier and enforces one-time use without introducing a database dependency.
+- The callback route validates `state` before exchanging the `code`, and GitHub token exchange or user lookup failures are translated into predictable API errors.
+- The module intentionally stops at GitHub identity exchange and does not mint local JWTs, cookies, or refresh tokens.
+
+### 3.4 GitHub OAuth configuration
+
+- `GITHUB_CLIENT_ID` is required.
+- `GITHUB_CLIENT_SECRET` is optional.
+- `GITHUB_OAUTH_SCOPE` defaults to `read:user user:email`.
 - `app/models/*.py`: response and data contracts.
 - `app/db.py`: environment-driven Supabase client creation and startup health check.
 
