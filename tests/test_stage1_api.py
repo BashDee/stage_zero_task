@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 from supabase import create_client
 
+from app.repositories.users import UserRecord
 from app.services.seed_profiles import SeedProfile, seed_profiles
 from main import app
 
@@ -38,10 +40,31 @@ def isolated_client(tmp_path, monkeypatch):
 
     monkeypatch.setenv("SUPABASE_URL", supabase_url)
     monkeypatch.setenv("SUPABASE_KEY", supabase_key)
+    monkeypatch.setenv("JWT_SECRET_KEY", "test-jwt-secret-key-stage1")
 
     with TestClient(app) as client:
         supabase_client = create_client(supabase_url, supabase_key)
         supabase_client.table("profiles").delete().neq("id", "").execute()
+
+        mock_user_repo = Mock()
+        mock_user_repo.find_by_github_id.return_value = UserRecord(
+            id="550e8400-e29b-41d4-a716-446655440000",
+            github_id=42,
+            username="octocat",
+            email="octo@example.com",
+            avatar_url="https://avatars.example.com/octocat",
+            role="analyst",
+            is_active=True,
+            last_login_at=None,
+            created_at="2026-04-01T00:00:00Z",
+        )
+        client.app.state.user_repository = mock_user_repo
+
+        access_token = client.app.state.jwt_service.generate_access_token(
+            github_id=42,
+            login="octocat",
+        )
+        client.headers.update({"Authorization": f"Bearer {access_token}"})
         yield client
 
 

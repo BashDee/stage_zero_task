@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from app.api.auth import router as auth_router
 from app.api.routes import router
 from app.db import init_db
+from app.middleware.auth import AccessTokenAuthMiddleware
 from app.repositories.tokens import TokenRepository
 from app.repositories.users import UserRepository
 from app.services.github_oauth import InMemoryOAuthStateStore
@@ -53,6 +54,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(AccessTokenAuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
