@@ -20,6 +20,10 @@ It also includes a GitHub OAuth PKCE client module under `/auth/github` and `/au
   - Redirects users to GitHub with PKCE at `GET /auth/github`
   - Exchanges the callback code at `GET /auth/github/callback`
   - Returns a normalized GitHub identity payload without issuing local session tokens
+- RBAC (Role-Based Access Control):
+  - All `/api/*` endpoints are protected by centralized access-token authentication and role-based authorization
+  - Declarative policy mapping enforces roles: `admin` (full access), `analyst` (read-only)
+  - Authorization failures return `403 Forbidden`; authentication failures return `401 Unauthorized`
 
 ## Tech Stack
 
@@ -34,6 +38,7 @@ It also includes a GitHub OAuth PKCE client module under `/auth/github` and `/au
 - `main.py` - app startup, CORS, global exception handlers
 - `app/api/routes.py` - HTTP route/view layer
 - `app/db.py` - database initialization
+- `app/middleware/auth.py` - centralized access-token authentication and RBAC enforcement
 - `app/models/classify.py` - Stage 0 response models
 - `app/models/profile.py` - Stage 1 profile models
 - `app/repositories/profiles.py` - profile persistence access layer
@@ -85,6 +90,55 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 5. Open docs:
 - Swagger UI: `http://localhost:8000/docs`
 - OpenAPI JSON: `http://localhost:8000/openapi.json`
+
+## Authentication and Authorization
+
+### Authentication
+All `/api/*` endpoints require a valid bearer access token in the `Authorization` header:
+
+```
+Authorization: Bearer <access_token>
+```
+
+- Valid token + active user → request proceeds to authorization check
+- Missing/invalid/expired token → `401 Unauthorized`
+- Valid token + inactive user → `403 Forbidden` (account disabled)
+
+### Authorization (RBAC)
+After authentication, request authorization is evaluated against a declarative role-based policy:
+
+**Policy Mapping**
+```python
+{
+  "admin": ("*",),              # admin: full access to all actions
+  "analyst": ("read:*",),       # analyst: read-only operations
+}
+```
+
+**Action Resolution**
+- Safe HTTP methods (`GET`, `HEAD`, `OPTIONS`) map to `read:*` actions
+- Mutating methods (`POST`, `PUT`, `PATCH`, `DELETE`) map to `write:*` actions
+
+**Authorization Outcomes**
+- Sufficient role permission → request proceeds
+- Insufficient role permission → `403 Forbidden` with message "Forbidden"
+
+**Examples**
+- Analyst `GET /api/profiles` → allowed (read:* action)
+- Analyst `POST /api/profiles` → `403 Forbidden` (insufficient write permission)
+- Admin `GET /api/profiles` → allowed (admin: "*")
+- Admin `POST /api/profiles` → allowed (admin: "*")
+
+### Custom Policy Configuration
+To override the default policy, set `app.state.rbac_policy` before adding the middleware:
+
+```python
+app.state.rbac_policy = {
+    "admin": ("*",),
+    "analyst": ("read:*",),
+    "viewer": ("read:profiles",),  # Custom: read profiles only
+}
+```
 
 ## Endpoints
 

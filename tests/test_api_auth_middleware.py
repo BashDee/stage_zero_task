@@ -29,6 +29,14 @@ def _build_test_app(*, jwt_service: JWTService, user: UserRecord | None) -> Fast
     async def get_context(request: Request):
         return {"status": "success", "data": asdict(request.state.user)}
 
+    @app.post("/api/context")
+    async def post_context(request: Request):
+        return {"status": "success", "data": asdict(request.state.user)}
+
+    @app.delete("/api/context")
+    async def delete_context(request: Request):
+        return {"status": "success", "data": asdict(request.state.user)}
+
     @app.get("/auth/ping")
     async def ping():
         return {"status": "success"}
@@ -44,6 +52,20 @@ def _active_user() -> UserRecord:
         email="octo@example.com",
         avatar_url="https://avatars.example.com/octocat",
         role="analyst",
+        is_active=True,
+        last_login_at=None,
+        created_at="2026-04-01T00:00:00Z",
+    )
+
+
+def _admin_user() -> UserRecord:
+    return UserRecord(
+        id="550e8400-e29b-41d4-a716-446655440001",
+        github_id=99,
+        username="admin",
+        email="admin@example.com",
+        avatar_url="https://avatars.example.com/admin",
+        role="admin",
         is_active=True,
         last_login_at=None,
         created_at="2026-04-01T00:00:00Z",
@@ -121,3 +143,80 @@ def test_auth_middleware_does_not_protect_auth_routes():
 
     assert response.status_code == 200
     assert response.json() == {"status": "success"}
+
+
+# ============================================================================
+# RBAC Tests
+# ============================================================================
+
+
+def test_rbac_analyst_allowed_read_operation():
+    jwt_service = JWTService(secret_key="test-secret-key")
+    app = _build_test_app(jwt_service=jwt_service, user=_active_user())
+    token = jwt_service.generate_access_token(github_id=42, login="octocat")
+
+    with TestClient(app) as client:
+        response = client.get("/api/context", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+
+
+def test_rbac_analyst_denied_write_operation_returns_403():
+    jwt_service = JWTService(secret_key="test-secret-key")
+    app = _build_test_app(jwt_service=jwt_service, user=_active_user())
+    token = jwt_service.generate_access_token(github_id=42, login="octocat")
+
+    with TestClient(app) as client:
+        response = client.post("/api/context", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 403
+    assert response.json() == {"status": "error", "message": "Forbidden"}
+
+
+def test_rbac_analyst_denied_delete_operation_returns_403():
+    jwt_service = JWTService(secret_key="test-secret-key")
+    app = _build_test_app(jwt_service=jwt_service, user=_active_user())
+    token = jwt_service.generate_access_token(github_id=42, login="octocat")
+
+    with TestClient(app) as client:
+        response = client.delete("/api/context", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 403
+    assert response.json() == {"status": "error", "message": "Forbidden"}
+
+
+def test_rbac_admin_allowed_read_operation():
+    jwt_service = JWTService(secret_key="test-secret-key")
+    app = _build_test_app(jwt_service=jwt_service, user=_admin_user())
+    token = jwt_service.generate_access_token(github_id=99, login="admin")
+
+    with TestClient(app) as client:
+        response = client.get("/api/context", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+
+
+def test_rbac_admin_allowed_write_operation():
+    jwt_service = JWTService(secret_key="test-secret-key")
+    app = _build_test_app(jwt_service=jwt_service, user=_admin_user())
+    token = jwt_service.generate_access_token(github_id=99, login="admin")
+
+    with TestClient(app) as client:
+        response = client.post("/api/context", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+
+
+def test_rbac_admin_allowed_delete_operation():
+    jwt_service = JWTService(secret_key="test-secret-key")
+    app = _build_test_app(jwt_service=jwt_service, user=_admin_user())
+    token = jwt_service.generate_access_token(github_id=99, login="admin")
+
+    with TestClient(app) as client:
+        response = client.delete("/api/context", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"

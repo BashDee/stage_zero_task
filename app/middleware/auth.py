@@ -13,6 +13,12 @@ from app.services.jwt_errors import ExpiredTokenError, InvalidTokenError
 ERROR_INVALID_TOKEN = "Invalid token"
 ERROR_MISSING_TOKEN = "Missing access token"
 ERROR_INACTIVE_USER = "User account is inactive"
+ERROR_FORBIDDEN = "Forbidden"
+
+DEFAULT_RBAC_POLICY: dict[str, tuple[str, ...]] = {
+    "admin": ("*",),
+    "analyst": ("read:*",),
+}
 
 
 @dataclass(frozen=True)
@@ -39,7 +45,7 @@ class UserLookupRepository(Protocol):
 
 
 class AccessTokenAuthMiddleware(BaseHTTPMiddleware):
-    """Protects /api/* routes by validating bearer access tokens."""
+    """Protects /api/* routes by validating bearer access tokens and RBAC rules."""
 
     def _error(self, status_code: int, message: str) -> JSONResponse:
         return JSONResponse(
@@ -61,6 +67,37 @@ class AccessTokenAuthMiddleware(BaseHTTPMiddleware):
     @staticmethod
     def _is_protected_path(path: str) -> bool:
         return path == "/api" or path.startswith("/api/")
+
+    @staticmethod
+    def _action_for_request(method: str, path: str) -> str:
+        if method.upper() in {"GET", "HEAD", "OPTIONS"}:
+            return "read:*"
+        return "write:*"
+
+    @staticmethod
+    def _is_allowed_action(allowed_actions: tuple[str, ...], action: str) -> bool:
+        if "*" in allowed_actions:
+            return True
+
+        for allowed in allowed_actions:
+            if allowed == action:
+                return True
+            if allowed.endswith(":*") and action.startswith(allowed[:-1]):
+                return True
+
+        return False
+
+    def _get_policy(self, request: Request) -> dict[str, tuple[str, ...]]:
+        policy = getattr(request.app.state, "rbac_policy", None)
+        if isinstance(policy, dict):
+            return policy
+        return DEFAULT_RBAC_POLICY
+
+    def _is_authorized(self, request: Request, role: str) -> bool:
+        policy = self._get_policy(request)
+        allowed_actions = policy.get(role, ())
+        action = self._action_for_request(request.method, request.url.path)
+        return self._is_allowed_action(allowed_actions, action)
 
     async def dispatch(self, request: Request, call_next) -> Response:
         if not self._is_protected_path(request.url.path):
@@ -90,6 +127,8 @@ class AccessTokenAuthMiddleware(BaseHTTPMiddleware):
                 role=user.role,
                 is_active=user.is_active,
             )
+            if not self._is_authorized(request, user.role):
+                return self._error(403, ERROR_FORBIDDEN)
         except ValueError:
             return self._error(401, ERROR_MISSING_TOKEN)
         except ExpiredTokenError:

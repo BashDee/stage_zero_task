@@ -68,6 +68,43 @@ def isolated_client(tmp_path, monkeypatch):
         yield client
 
 
+@pytest.fixture()
+def admin_client(tmp_path, monkeypatch):
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    if not supabase_url or not supabase_key:
+        pytest.skip("Set SUPABASE_URL and SUPABASE_KEY (or SUPABASE_SERVICE_ROLE_KEY) to run integration tests")
+
+    monkeypatch.setenv("SUPABASE_URL", supabase_url)
+    monkeypatch.setenv("SUPABASE_KEY", supabase_key)
+    monkeypatch.setenv("JWT_SECRET_KEY", "test-jwt-secret-key-stage1")
+
+    with TestClient(app) as client:
+        supabase_client = create_client(supabase_url, supabase_key)
+        supabase_client.table("profiles").delete().neq("id", "").execute()
+
+        mock_user_repo = Mock()
+        mock_user_repo.find_by_github_id.return_value = UserRecord(
+            id="550e8400-e29b-41d4-a716-446655440001",
+            github_id=99,
+            username="admin_user",
+            email="admin@example.com",
+            avatar_url="https://avatars.example.com/admin",
+            role="admin",
+            is_active=True,
+            last_login_at=None,
+            created_at="2026-04-01T00:00:00Z",
+        )
+        client.app.state.user_repository = mock_user_repo
+
+        access_token = client.app.state.jwt_service.generate_access_token(
+            github_id=99,
+            login="admin_user",
+        )
+        client.headers.update({"Authorization": f"Bearer {access_token}"})
+        yield client
+
+
 def install_upstream_successes(client: TestClient, *, gender: str = "female", age: int = 46, country_id: str = "DRC"):
     async def fake_get(url: str, **kwargs):
         await asyncio.sleep(0)
@@ -503,3 +540,96 @@ def test_seed_profiles_is_idempotent_by_name():
     assert inserted == 1
     assert len(fake_client._table.inserted_batches) == 1
     assert fake_client._table.inserted_batches[0][0]["name"] == "bob"
+
+
+# ============================================================================
+# RBAC Integration Tests
+# ============================================================================
+
+
+def test_rbac_analyst_can_read_profiles(isolated_client):
+    """Analyst can perform GET operations on /api/profiles."""
+    install_upstream_successes(isolated_client)
+    create_profile(isolated_client, "alice")
+
+    response = isolated_client.get("/api/profiles")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert response.json()["total"] >= 1
+
+
+def test_rbac_analyst_can_read_classify(isolated_client):
+    """Analyst can perform GET operations on /api/classify."""
+    async def fake_get(url: str, **kwargs):
+        await asyncio.sleep(0)
+        return FakeResponse({"gender": "male", "probability": 0.99, "count": 1234})
+
+    isolated_client.app.state.http_client.get = fake_get
+
+    response = isolated_client.get("/api/classify?name=bashir")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+
+
+def test_rbac_analyst_cannot_create_profile_returns_403(isolated_client):
+    """Analyst cannot POST to /api/profiles and receives 403."""
+    install_upstream_successes(isolated_client)
+
+    response = isolated_client.post("/api/profiles", json={"name": "alice"})
+
+    assert response.status_code == 403
+    assert response.json() == {"status": "error", "message": "Forbidden"}
+
+
+def test_rbac_analyst_cannot_delete_profile_returns_403(isolated_client):
+    """Analyst cannot DELETE from /api/profiles/{id} and receives 403."""
+    install_upstream_successes(isolated_client)
+    created = create_profile(isolated_client, "alice")
+    profile_id = created.json()["data"]["id"]
+
+    # Verify profile was created (by admin user before test or fixture setup)
+    # For this test, manually switch to admin to create, then verify analyst cannot delete
+    # But since this test already has analyst role, just try the delete:
+    response = isolated_client.delete(f"/api/profiles/{profile_id}")
+
+    assert response.status_code == 403
+    assert response.json() == {"status": "error", "message": "Forbidden"}
+
+
+def test_rbac_admin_can_create_profile(admin_client):
+    """Admin can POST to /api/profiles."""
+    install_upstream_successes(admin_client)
+
+    response = admin_client.post("/api/profiles", json={"name": "alice"})
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "success"
+
+
+def test_rbac_admin_can_delete_profile(admin_client):
+    """Admin can DELETE from /api/profiles/{id}."""
+    install_upstream_successes(admin_client)
+    created = admin_client.post("/api/profiles", json={"name": "alice"})
+    profile_id = created.json()["data"]["id"]
+
+    response = admin_client.delete(f"/api/profiles/{profile_id}")
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+    # Verify deletion by attempting to fetch
+    follow_up = admin_client.get(f"/api/profiles/{profile_id}")
+    assert follow_up.status_code == 404
+
+
+def test_rbac_admin_can_read_profiles(admin_client):
+    """Admin can perform GET operations on /api/profiles."""
+    install_upstream_successes(admin_client)
+    admin_client.post("/api/profiles", json={"name": "alice"})
+
+    response = admin_client.get("/api/profiles")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
