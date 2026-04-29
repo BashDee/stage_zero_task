@@ -1,9 +1,11 @@
 from typing import Any
+import math
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
 from app.models.classify import ErrorResponse, SuccessResponse
+from app.models.profile import PaginationLinks
 from app.services.classify import ClassifyService
 from app.services.profiles import ProfileNotFoundError, ProfilesService
 
@@ -49,6 +51,60 @@ def _parse_non_negative_int(value: str) -> int:
     if parsed < 0:
         raise ValueError("range")
     return parsed
+
+
+def _parse_probability(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0.0 or parsed > 1.0:
+        raise ValueError("range")
+    return parsed
+
+
+def _build_pagination_links(
+    request: Request,
+    page: int,
+    limit: int,
+    total: int,
+    endpoint: str,
+) -> PaginationLinks:
+    """Build pagination links (self, next, prev) for a paginated response.
+    
+    Args:
+        request: FastAPI request object with query params
+        page: Current page number (1-indexed)
+        limit: Items per page
+        total: Total number of items
+        endpoint: API endpoint path (e.g., '/profiles' or '/profiles/search')
+    """
+    total_pages = math.ceil(total / limit) if total > 0 else 0
+    
+    # Build self link with all current query params
+    query_params_list = []
+    for key, value in request.query_params.items():
+        query_params_list.append(f"{key}={value}")
+    self_url = endpoint
+    if query_params_list:
+        self_url = f"{endpoint}?{'&'.join(query_params_list)}"
+    
+    # Build next link if not on last page
+    next_url = None
+    if page < total_pages:
+        # Reconstruct URL with next page
+        params = dict(request.query_params)
+        params['page'] = str(page + 1)
+        query_parts = [f"{k}={v}" for k, v in params.items()]
+        next_url = f"{endpoint}?{'&'.join(query_parts)}"
+    
+    # Build prev link if not on first page
+    prev_url = None
+    if page > 1:
+        # Reconstruct URL with previous page
+        params = dict(request.query_params)
+        params['page'] = str(page - 1)
+        query_parts = [f"{k}={v}" for k, v in params.items()]
+        prev_url = f"{endpoint}?{'&'.join(query_parts)}"
+    
+    return PaginationLinks(self=self_url, next=next_url, prev=prev_url)
 
 
 def _parse_probability(value: str) -> float:
@@ -239,9 +295,17 @@ async def search_profiles(request: Request):
         return _build_error_response(422, INVALID_QUERY_PARAMS_MESSAGE)
 
     service = ProfilesService(request.app.state.http_client)
-    payload = service.search_profiles(query=q, page=page_value, limit=limit_value)
+    
+    # First call service with temporary links, then rebuild with actual total
+    temp_links = PaginationLinks(self=str(request.url), next=None, prev=None)
+    payload = service.search_profiles(query=q, page=page_value, limit=limit_value, links=temp_links)
     if payload is None:
         return _build_error_response(400, "Unable to interpret query")
+    
+    # Rebuild links with actual total from the response
+    actual_links = _build_pagination_links(request, page_value, limit_value, payload.total, "/api/profiles/search")
+    payload.links = actual_links
+    
     return payload
 
 
@@ -291,7 +355,18 @@ async def get_profiles(
         return _build_error_response(422, INVALID_QUERY_PARAMS_MESSAGE)
 
     service = ProfilesService(request.app.state.http_client)
-    return service.list_profiles(**query)
+    page = query["page"]
+    limit = query["limit"]
+    
+    # First call service with temporary links, then rebuild with actual total
+    temp_links = PaginationLinks(self=str(request.url), next=None, prev=None)
+    result = service.list_profiles(**{**query, "links": temp_links})
+    
+    # Now rebuild links with actual total from the response
+    actual_links = _build_pagination_links(request, page, limit, result.total, "/api/profiles")
+    result.links = actual_links
+    
+    return result
 
 
 @router.delete(

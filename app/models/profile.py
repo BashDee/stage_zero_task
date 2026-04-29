@@ -33,9 +33,17 @@ class ProfileAlreadyExistsResponse(BaseModel):
     data: ProfileData
 
 
+class PaginationLinks(BaseModel):
+    self: str
+    next: str | None = None
+    prev: str | None = None
+
+
 class ProfilesListResponse(BaseModel):
     status: Literal["success"] = "success"
     page: int = Field(ge=1)
     limit: int = Field(ge=1, le=50)
     total: int = Field(ge=0)
+    total_pages: int = Field(ge=0)
+    links: PaginationLinks
     data: list[ProfileData]

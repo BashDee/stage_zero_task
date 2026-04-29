@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import os
 import time
 from typing import Literal
@@ -11,6 +12,7 @@ from httpx import AsyncClient
 from app.db import get_supabase_client
 from app.models.classify import ErrorResponse
 from app.models.profile import (
+    PaginationLinks,
     ProfileAlreadyExistsResponse,
     ProfileData,
     ProfileSuccessResponse,
@@ -170,6 +172,7 @@ class ProfilesService:
         order: str,
         page: int,
         limit: int,
+        links: PaginationLinks,
     ) -> ProfilesListResponse:
         result = self._repository.list_profiles(
             ProfileQuery(
@@ -186,14 +189,17 @@ class ProfilesService:
                 limit=limit,
             )
         )
+        total_pages = math.ceil(result.total / limit) if result.total > 0 else 0
         return ProfilesListResponse(
             page=page,
             limit=limit,
             total=result.total,
+            total_pages=total_pages,
+            links=links,
             data=[self._to_profile_data(record) for record in result.rows],
         )
 
-    def search_profiles(self, *, query: str, page: int, limit: int) -> ProfilesListResponse | None:
+    def search_profiles(self, *, query: str, page: int, limit: int, links: PaginationLinks) -> ProfilesListResponse | None:
         parsed = self._search_parser.parse(query)
         if parsed is None:
             return None
@@ -210,6 +216,7 @@ class ProfilesService:
             order="asc",
             page=page,
             limit=limit,
+            links=links,
         )
 
     def delete_profile(self, profile_id: str) -> bool:
