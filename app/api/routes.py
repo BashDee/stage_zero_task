@@ -2,7 +2,7 @@ from typing import Any
 import math
 
 from fastapi import APIRouter, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.models.classify import ErrorResponse, SuccessResponse
 from app.models.profile import PaginationLinks
@@ -116,6 +116,7 @@ def _parse_probability(value: str) -> float:
 
 def _parse_profiles_list_query(request: Request) -> dict[str, Any]:
     allowed = {
+        "format",
         "gender",
         "age_group",
         "country_id",
@@ -307,6 +308,61 @@ async def search_profiles(request: Request):
     payload.links = actual_links
     
     return payload
+
+
+@router.get(
+    "/profiles/export",
+    summary="Export profiles as CSV",
+    responses={
+        200: {"description": "CSV file exported"},
+        400: {"model": ErrorResponse, "description": "API version header required"},
+        422: {"model": ErrorResponse, "description": "Invalid query parameters"},
+        500: {"model": ErrorResponse, "description": "Unexpected server error"},
+    },
+)
+async def export_profiles(request: Request):
+    version_error = _require_profile_api_version(request)
+    if version_error is not None:
+        return version_error
+
+    # Validate format parameter
+    try:
+        format_value = _single_query_param(request, "format")
+    except ValueError:
+        return _build_error_response(422, INVALID_QUERY_PARAMS_MESSAGE)
+    
+    if format_value is None:
+        return _build_error_response(422, INVALID_QUERY_PARAMS_MESSAGE)
+    
+    if format_value.strip().lower() != "csv":
+        return _build_error_response(422, INVALID_QUERY_PARAMS_MESSAGE)
+
+    # Parse filtering and sorting parameters (ignore page/limit)
+    try:
+        query = _parse_profiles_list_query(request)
+    except (ValueError, TypeError):
+        return _build_error_response(422, INVALID_QUERY_PARAMS_MESSAGE)
+
+    service = ProfilesService(request.app.state.http_client)
+    csv_content, timestamp = service.export_profiles_csv(
+        gender=query["gender"],
+        country_id=query["country_id"],
+        age_group=query["age_group"],
+        min_age=query["min_age"],
+        max_age=query["max_age"],
+        min_gender_probability=query["min_gender_probability"],
+        min_country_probability=query["min_country_probability"],
+        sort_by=query["sort_by"],
+        order=query["order"],
+    )
+    
+    # Return CSV as streaming response
+    filename = f"profiles_{timestamp}.csv"
+    return StreamingResponse(
+        iter([csv_content]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 from datetime import datetime, timezone
+from io import StringIO
 import math
 import os
 import time
@@ -218,6 +220,76 @@ class ProfilesService:
             limit=limit,
             links=links,
         )
+
+    def export_profiles_csv(
+        self,
+        *,
+        gender: str | None,
+        country_id: str | None,
+        age_group: str | None,
+        min_age: int | None,
+        max_age: int | None,
+        min_gender_probability: float | None,
+        min_country_probability: float | None,
+        sort_by: str,
+        order: str,
+    ) -> tuple[str, str]:
+        """Export profiles as CSV with filtering and sorting.
+        
+        Args:
+            gender, country_id, age_group, min_age, max_age, min_gender_probability,
+            min_country_probability, sort_by, order: Same as list_profiles parameters
+        
+        Returns:
+            Tuple of (csv_content, timestamp_for_filename)
+            Example: ("id,name,gender,...\\n...", "2026-04-29T14_30_45Z")
+        """
+        query_result = self._repository.list_profiles_unbounded(
+            ProfileQuery(
+                gender=gender.strip().lower() if isinstance(gender, str) else None,
+                country_id=country_id.strip().upper() if isinstance(country_id, str) else None,
+                age_group=age_group.strip().lower() if isinstance(age_group, str) else None,
+                min_age=min_age,
+                max_age=max_age,
+                min_gender_probability=min_gender_probability,
+                min_country_probability=min_country_probability,
+                sort_by=sort_by,
+                order=order,
+            )
+        )
+        
+        # Generate CSV
+        output = StringIO()
+        writer = csv.writer(output, delimiter=",", lineterminator="\n")
+        
+        # Write header
+        writer.writerow([
+            "id", "name", "gender", "gender_probability", "age", 
+            "age_group", "country_id", "country_name", "country_probability", "created_at"
+        ])
+        
+        # Write data rows
+        for record in query_result:
+            writer.writerow([
+                record.id,
+                record.name,
+                record.gender,
+                record.gender_probability,
+                record.age,
+                record.age_group,
+                record.country_id,
+                record.country_name,
+                record.country_probability,
+                record.created_at,
+            ])
+        
+        csv_content = output.getvalue()
+        output.close()
+        
+        # Generate timestamp for filename (UTC, ISO 8601 with colons replaced)
+        timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z").replace(":", "_")
+        
+        return csv_content, timestamp
 
     def delete_profile(self, profile_id: str) -> bool:
         return self._repository.delete(profile_id)

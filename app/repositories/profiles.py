@@ -212,6 +212,46 @@ class ProfileRepository:
             total=int(response.count or 0),
         )
 
+    def list_profiles_unbounded(self, query_spec: ProfileQuery) -> list[ProfileRecord]:
+        """List all profiles matching filters without pagination.
+        
+        Args:
+            query_spec: Filter and sort specification (page/limit fields are ignored)
+        
+        Returns:
+            List of all matching ProfileRecord objects
+        """
+        query = self._client.table("profiles").select(self._select_fields())
+
+        if query_spec.gender is not None:
+            query = query.eq("gender", query_spec.gender)
+
+        if query_spec.age_group is not None:
+            query = query.eq("age_group", query_spec.age_group)
+
+        if query_spec.country_id is not None:
+            query = query.eq("country_id", query_spec.country_id)
+
+        if query_spec.min_age is not None:
+            query = query.gte("age", query_spec.min_age)
+
+        if query_spec.max_age is not None:
+            query = query.lte("age", query_spec.max_age)
+
+        if query_spec.min_gender_probability is not None:
+            query = query.gte("gender_probability", query_spec.min_gender_probability)
+
+        if query_spec.min_country_probability is not None:
+            query = query.gte("country_probability", query_spec.min_country_probability)
+
+        response = (
+            query.order(query_spec.sort_by, desc=(query_spec.order == "desc"))
+            .execute()
+        )
+        rows = response.data or []
+
+        return [self._map_row(row) for row in rows]
+
     def delete(self, profile_id: str) -> bool:
         # Check if record exists
         existing = self.get_by_id(profile_id)
